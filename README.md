@@ -21,7 +21,7 @@ gcc -o activation Overhead_Assessment/C/main.c -lm
 - Error tolerance: 0.000001
 
 # Training
-# NASA Jet Engine RUL Prediction
+# NASA Jet Engine RUL Prediction Enabled with Error Detection
 
 CNN model to predict Remaining Useful Life of aircraft jet engines using NASA C-MAPSS dataset.
 
