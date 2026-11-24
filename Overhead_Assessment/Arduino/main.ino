@@ -1,12 +1,23 @@
+/*
+ * MAED overhead on the Arduino UNO (ATmega328P @ 16 MHz).
+ *
+ * Baseline vs. protected (MAED) sigmoid, tanh and L2 normalization.
+ *  - Sigmoid / tanh: 30 cached Maclaurin terms, summed once into even and odd parts,
+ *      e^{x} = S_even + S_odd,  e^{-x} = S_even - S_odd,
+ *    so the check obtains its exponential for one extra addition.
+ *    Inputs are clipped to [-3, 3]; on the AVR, double is 32-bit, so the
+ *    tolerance is 1e-4 (relative for sigmoid, absolute for tanh).
+ *  - L2 normalization (n = 128): check sum_i y_i^2 = 1 with tolerance 1e-4.
+ *  - Every result is written to a volatile sink: if results are discarded,
+ *    avr-gcc -Os deletes the computation and the check, and the measured
+ *    overhead is meaningless.
+ * Prints the elapsed time / clock cycles of 500 calls per function, the number
+ * of alarms during the timing runs, and a false-alarm sweep over [-10, 10].
+ */
 #include <Arduino.h>
 #define SAMPLES 500
-unsigned long startTime;
 
-unsigned long sigmoid_elapsedTime;
-unsigned long error_sigmoid_elapsedTime;
 
-unsigned long tanh_elapsedTime;
-unsigned long error_tanh_elapsedTime;
 
 // Coefficients for Maclaurin series
 double coeffs[] = {
@@ -66,97 +77,82 @@ void Maclaurin_terms(double x, int num_terms) {
     }
 }
 
-double custom_exp(int num_terms) {
-    double result = 0;
-    for (int i = 0; i < num_terms; i++){
-        result += maclaurin_array[i];
+// Cached Maclaurin terms are summed once into even and odd parts:
+//   e^{x} = S_even + S_odd,   e^{-x} = S_even - S_odd
+// so the baseline gets the exponential it needs and the check gets the
+// other one for a single extra addition (as in the FPGA design).
+double S_even, S_odd;
+void maclaurin_sums(int num_terms) {
+    double se = 0, so = 0;
+    for (int i = 0; i < num_terms; i += 2) {
+        se += maclaurin_array[i];
+        so += maclaurin_array[i + 1];
     }
-    return result;
-}
-
-double custom_inverse_exp(int num_terms) {
-    double result = 0;
-    int sign;
-    for (int i = 0; i < num_terms; i++){
-        sign = 1 - 2 * (i & 1);
-        result += sign * maclaurin_array[i];
-    }
-    return result;
+    S_even = se; S_odd = so;
 }
 
 double sigmoid(double input){
-    double clipped_value = clip_by_value(input, -10, 10);
+    double clipped_value = clip_by_value(input, -3, 3);
     int arraySize = 30;
     Maclaurin_terms(clipped_value, arraySize);
-    double inv_exp = custom_inverse_exp(arraySize);
+    maclaurin_sums(arraySize);
+    double inv_exp = S_even - S_odd;
     return 1 / (1 + inv_exp);
 }
 
 double tanh_func(double input){
-    double clipped_value = clip_by_value(input, -10, 10);
+    double clipped_value = clip_by_value(input, -3, 3);
     int arraySize = 30;
     Maclaurin_terms(2 * clipped_value, arraySize);
-    double exp_value = custom_exp(arraySize);
+    maclaurin_sums(arraySize);
+    double exp_value = S_even + S_odd;
     return (exp_value - 1) / (exp_value + 1);
 }
 
 double tanh_error_detection(double input, ErrorCode *error_out){
-    double clipped_value = clip_by_value(input, -10, 10);
+    double clipped_value = clip_by_value(input, -3, 3);
     int arraySize = 30;
     Maclaurin_terms(2 * clipped_value, arraySize);
-    double exp_value = custom_exp(arraySize);
+    maclaurin_sums(arraySize);
+    double exp_value = S_even + S_odd;
     double y = (exp_value - 1) / (exp_value + 1);
-    
+
     // Error detection started
-    double exp_inv_value = custom_inverse_exp(arraySize);
+    double exp_inv_value = S_even - S_odd;        // cached terms: one addition
     double alpha = (1 - y) / (1 + y);
     double left = (alpha - 1) / (alpha + 1);
     double right = (exp_inv_value - 1) / (exp_inv_value + 1);
-    double epsilon = 0.000001;
+    double epsilon = 0.0001;            // float32 on AVR: absolute tolerance, tanh in [-1, 1]
     if (fabs(left - right) < epsilon) {
         *error_out = SUCCESS;
         return y;
-
     } else {
         *error_out = ERROR;
         return 0;
     }
-
 }
 
 double sigmoid_error_detection(double input, ErrorCode *error_out){
-    double clipped_value = clip_by_value(input, -10, 10);
+    double clipped_value = clip_by_value(input, -3, 3);
     int arraySize = 30;
     Maclaurin_terms(clipped_value, arraySize);
-    double inv_exp = custom_inverse_exp(arraySize);
+    maclaurin_sums(arraySize);
+    double inv_exp = S_even - S_odd;
+    double y = 1 / (1 + inv_exp);
 
     // Error detection started
-    double y = 1 / (1 + inv_exp);
     double left = y / (1 - y);
-    double right = custom_exp(arraySize);
-    double epsilon = 0.000001;
-    
-    if (fabs(left - right) < epsilon) {
+    double right = S_even + S_odd;                // cached terms: one addition
+    double epsilon = 0.0001;            // float32 on AVR: relative tolerance
+    if (fabs(left - right) < epsilon * right) {
         *error_out = SUCCESS;
         return y;
-
     } else {
         *error_out = ERROR;
         return 0;
     }
-
 }
 
-// Function to measure clock cycles
-unsigned long measureClockCycles(void (*func)(void)) {
-    unsigned long start = micros();
-    func();
-    unsigned long end = micros();
-    return (end - start) * (F_CPU / 1000000UL); // Convert microseconds to clock cycles
-}
-
-// Store test inputs in PROGMEM (flash memory)
-// Pre-generated random values between -10 and 10 (1000 inputs)
 const double test_inputs[SAMPLES] PROGMEM = {
   3.45, -7.82, 1.23, -9.54, 5.67, -2.34, 8.91, -4.56, 0.78, -6.89,
   9.12, -3.45, 2.56, -8.76, 4.32, -1.23, 7.89, -5.67, 3.21, -9.87,
@@ -210,99 +206,103 @@ const double test_inputs[SAMPLES] PROGMEM = {
   0.12, -0.34, 3.89, -4.45, 8.34, -2.78, 1.23, -7.45, 5.45, -3.12,
 };
 
-
 // Read test input from PROGMEM
 double getTestInput(int index) {
     return pgm_read_float(&test_inputs[index]);
 }
-
-// Global index for current test input
 int input_index = 0;
 
-// Wrapper functions for cycle measurement
-void sigmoid_wrapper() {
-    sigmoid(getTestInput(input_index));
+// ---------------------------------------------------------------------------
+// Sinks: make every result observable, so that avr-gcc -Os cannot delete the
+// computation (or the error check) whose result would otherwise be unused.
+volatile double sink;
+volatile unsigned int err_count;
+
+// ---------------------------------------------------------------------------
+// L2 normalization y = x / ||x||_2  and its MAED check  sum_i y_i^2 = 1
+#define L2_DIM 128
+double l2_x[L2_DIM + 8];
+double l2_y[L2_DIM];
+
+void l2norm(const double *x, double *y, int n) {
+    double ss = 0;
+    for (int i = 0; i < n; i++)
+        ss += x[i] * x[i];
+    double nrm = sqrt(ss);
+    if (nrm < 1e-12)
+        nrm = 1e-12;
+    double inv = 1 / nrm;
+    for (int i = 0; i < n; i++)
+        y[i] = x[i] * inv;
 }
 
-void tanh_wrapper() {
-    tanh_func(getTestInput(input_index));
+void l2norm_error_detection(const double *x, double *y, int n, ErrorCode *error_out) {
+    l2norm(x, y, n);
+    // Error detection started
+    double s = 0;
+    for (int i = 0; i < n; i++)
+        s += y[i] * y[i];
+    double epsilon = 0.0001;          // float32 (AVR double): sum of n rounded squares
+    if (fabs(s - 1) < epsilon)
+        *error_out = SUCCESS;
+    else
+        *error_out = ERROR;
 }
 
-void tanh_error_detection_wrapper() {
-    // tanh_func(getTestInput(input_index));
-    // tanh_func(getTestInput(input_index));
-    ErrorCode err;
-    tanh_error_detection(getTestInput(input_index), &err);
+unsigned long run_time(int which) {
+    unsigned long t = micros();
+    for (input_index = 0; input_index < SAMPLES; input_index++) {
+        ErrorCode err = SUCCESS;
+        double x = getTestInput(input_index);
+        switch (which) {
+            case 0: sink = sigmoid(x); break;
+            case 1: sink = sigmoid_error_detection(x, &err); break;
+            case 2: sink = tanh_func(x); break;
+            case 3: sink = tanh_error_detection(x, &err); break;
+            case 4: l2norm(l2_x + (input_index & 7), l2_y, L2_DIM); sink = l2_y[input_index & 63]; break;
+            case 5: l2norm_error_detection(l2_x + (input_index & 7), l2_y, L2_DIM, &err); sink = l2_y[input_index & 63]; break;
+        }
+        if (err != SUCCESS) err_count++;
+    }
+    return micros() - t;
 }
 
-void sigmoid_error_detection_wrapper() {
-    ErrorCode err;
-    sigmoid_error_detection(getTestInput(input_index), &err);
-}
+const char *names[] = {"sigmoid", "error_sigmoid", "tanh", "error_tanh", "l2norm", "error_l2norm"};
 
 void setup() {
     Serial.begin(9600);
-    delay(2000); // Wait for serial to initialize
-    
-    Serial.println("========================================");
-    Serial.println("Arduino UNO Clock Cycle Profiler");
-    Serial.println("========================================");
-    Serial.print("F_CPU: ");
-    Serial.print(F_CPU);
-    Serial.println(" Hz");
-    Serial.println("Test inputs stored in PROGMEM (flash)");
-    Serial.println("Number of test inputs: 1000");
-    Serial.println();
+    for (int i = 0; i < L2_DIM + 8; i++)          // L2 input vector from the same test inputs
+        l2_x[i] = getTestInput((i * 37) % SAMPLES);
+    Serial.println("Arduino UNO clock cycles (results used, volatile sink)");
+    // false-alarm sweep: 2001 inputs in [-10, 10] for sigmoid / tanh, 200 random-ish vectors for L2
+    unsigned int fa_sig = 0, fa_tanh = 0, fa_l2 = 0;
+    for (int i = 0; i <= 2000; i++) {
+        double x = -10.0 + i * 0.01;
+        ErrorCode e1, e2;
+        sigmoid_error_detection(x, &e1); tanh_error_detection(x, &e2);
+        fa_sig += (e1 != SUCCESS); fa_tanh += (e2 != SUCCESS);
+    }
+    for (int k = 0; k < 200; k++) {
+        ErrorCode e3;
+        for (int i = 0; i < L2_DIM; i++) l2_y[i] = getTestInput((i * 7 + k * 13) % SAMPLES) * (1 + (k % 10));
+        for (int i = 0; i < L2_DIM; i++) l2_x[i] = l2_y[i];
+        l2norm_error_detection(l2_x, l2_y, L2_DIM, &e3);
+        fa_l2 += (e3 != SUCCESS);
+    }
+    for (int i = 0; i < L2_DIM + 8; i++) l2_x[i] = getTestInput((i * 37) % SAMPLES);
+    Serial.print("false alarms (sweep): sigmoid "); Serial.print(fa_sig); Serial.print("/2001, tanh ");
+    Serial.print(fa_tanh); Serial.print("/2001, l2norm "); Serial.print(fa_l2); Serial.println("/200");
 }
 
 void loop() {
-
-    //sigmoid
-    startTime = micros();
-    for (input_index = 0; input_index < SAMPLES; input_index++) {
-        sigmoid(getTestInput(input_index));
+    for (int w = 0; w < 6; w++) {
+        err_count = 0;
+        unsigned long us = run_time(w);
+        Serial.print(names[w]); Serial.print(": ");
+        Serial.print(us); Serial.print(" us, ");
+        Serial.print(us * (F_CPU / 1000000UL)); Serial.print(" cycles, alarms ");
+        Serial.println(err_count);
     }
-    sigmoid_elapsedTime = micros() - startTime;
-    Serial.print("sigmoid Execution Time: ");
-    Serial.print(sigmoid_elapsedTime);
-    Serial.println(" microseconds");
-
-    // //sigmoid error
-    // startTime = micros();
-    // for (input_index = 0; input_index < SAMPLES; input_index++) {
-    //     ErrorCode err;
-    //     sigmoid_error_detection(getTestInput(input_index), &err);
-    // }
-    // error_sigmoid_elapsedTime = micros() - startTime;
-    // Serial.print("sigmoid_error_detection Execution Time: ");
-    // Serial.print(error_sigmoid_elapsedTime);
-    // Serial.println(" microseconds");
-
-    // //tanh
-    // startTime = micros();
-    // for (input_index = 0; input_index < SAMPLES; input_index++) {
-    //     tanh_func(getTestInput(input_index));
-    // }
-    // tanh_elapsedTime = micros() - startTime;
-    // Serial.print("tanh Execution Time: ");
-    // Serial.print(tanh_elapsedTime);
-    // Serial.println(" microseconds");
-
-    //tanh error
-    // startTime = micros();
-    // for (input_index = 0; input_index < SAMPLES; input_index++) {
-    //     ErrorCode err;
-    //     tanh_error_detection(getTestInput(input_index), &err);
-    // }
-    // error_tanh_elapsedTime = micros() - startTime;
-    // Serial.print("tanh_error_detection Execution Time: ");
-    // Serial.print(error_tanh_elapsedTime);
-    // Serial.println(" microseconds");
     Serial.println("========== END ==========");
-
-    // Serial.print("Sigmoid overhead:");
-    // double x = (error_sigmoid_elapsedTime-sigmoid_elapsedTime)/sigmoid_elapsedTime;
-    // Serial.println(x,7);
-    
-    delay(5000); // Wait 5 seconds before next measurement
+    while (1) {}
 }
