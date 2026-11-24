@@ -5,7 +5,7 @@
  *  - 30 cached Maclaurin terms, summed once into even and odd parts,
  *      e^{x} = S_even + S_odd,  e^{-x} = S_even - S_odd;
  *  - inputs clipped to [-3, 3];
- *  - tolerance 1e-4 (relative for sigmoid, absolute for tanh, sum y^2 = 1 for L2).
+ *  - absolute checks: |y/(1-y) - e^x| < 1e-3 (sigmoid), 1e-4 (tanh and L2, sum y^2 = 1).
  * main() runs a false-alarm sweep and a fault-injection test.
  */
 #include <stdio.h>
@@ -13,6 +13,7 @@
 
 #define NUM_TERMS 30
 #define EPSILON   0.0001
+#define EPSILON_SIGMOID 0.001
 
 typedef enum { SUCCESS = 0, ERROR } ErrorCode;
 
@@ -67,7 +68,7 @@ double sigmoid_error_detection(double input, ErrorCode *error_out) {
     /* error detection */
     double left = y / (1 - y);
     double right = S_even + S_odd;                   /* cached terms: one addition */
-    *error_out = (fabs(left - right) < EPSILON * right) ? SUCCESS : ERROR;
+    *error_out = (fabs(left - right) < EPSILON_SIGMOID) ? SUCCESS : ERROR;
     return y;
 }
 

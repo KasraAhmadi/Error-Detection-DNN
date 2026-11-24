@@ -1,0 +1,9 @@
+{
+  "name": "maed-arduino-sim",
+  "private": true,
+  "type": "module",
+  "description": "Cycle-accurate ATmega328P simulation of Overhead_Assessment/Arduino/main.ino",
+  "dependencies": {
+    "avr8js": "0.21.1"
+  }
+}

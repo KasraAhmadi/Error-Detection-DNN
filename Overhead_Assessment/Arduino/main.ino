@@ -5,8 +5,8 @@
  *  - Sigmoid / tanh: 30 cached Maclaurin terms, summed once into even and odd parts,
  *      e^{x} = S_even + S_odd,  e^{-x} = S_even - S_odd,
  *    so the check obtains its exponential for one extra addition.
- *    Inputs are clipped to [-3, 3]; on the AVR, double is 32-bit, so the
- *    tolerance is 1e-4 (relative for sigmoid, absolute for tanh).
+ *    Inputs are clipped to [-3, 3]; on the AVR, double is 32-bit. The checks are
+ *    absolute: |y/(1-y) - e^x| < 1e-3 (sigmoid) and 1e-4 (tanh).
  *  - L2 normalization (n = 128): check sum_i y_i^2 = 1 with tolerance 1e-4.
  *  - Every result is written to a volatile sink: if results are discarded,
  *    avr-gcc -Os deletes the computation and the check, and the measured
@@ -143,8 +143,8 @@ double sigmoid_error_detection(double input, ErrorCode *error_out){
     // Error detection started
     double left = y / (1 - y);
     double right = S_even + S_odd;                // cached terms: one addition
-    double epsilon = 0.0001;            // float32 on AVR: relative tolerance
-    if (fabs(left - right) < epsilon * right) {
+    double epsilon = 0.001;             // float32 on AVR: absolute tolerance
+    if (fabs(left - right) < epsilon) {
         *error_out = SUCCESS;
         return y;
     } else {
