@@ -1,0 +1,6 @@
+# Overhead_Assessment build outputs
+Overhead_Assessment/Arduino/simulate/node_modules/
+Overhead_Assessment/Arduino/simulate/package-lock.json
+Overhead_Assessment/Arduino/build/
+Overhead_Assessment/Cortex-M4F/bench.elf
+__pycache__/
