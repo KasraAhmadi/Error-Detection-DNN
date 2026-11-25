@@ -1,4 +1,4 @@
-"""Run the Cortex-M4F MAED benchmark (bench.c, same code and inputs as the Arduino UNO
+"""Run the Cortex-M4F MAED benchmark (taylor_kernels.c: the Algorithm-5 kernels, same as the Arduino UNO
 sketch) in the emulator and estimate clock cycles from the executed-instruction trace with
 the Cortex-M4 TRM instruction timings (zero-wait-state memory).
 

@@ -6,7 +6,8 @@
  *      e^{x} = S_even + S_odd,  e^{-x} = S_even - S_odd,
  *    so the check obtains its exponential for one extra addition.
  *    Inputs are clipped to [-3, 3]; on the AVR, double is 32-bit. The checks are
- *    absolute: |y/(1-y) - e^x| < 1e-3 (sigmoid) and 1e-4 (tanh).
+ *    absolute: |y/(1-y) - e^x| < 5e-3 (sigmoid) and 5e-4 (tanh), plus an input check
+ *    (the clipped input is compared with an independent recomputation of clip(x)).
  *  - L2 normalization (n = 128): check sum_i y_i^2 = 1 with tolerance 1e-4.
  *  - Every result is written to a volatile sink: if results are discarded,
  *    avr-gcc -Os deletes the computation and the check, and the measured
@@ -58,7 +59,9 @@ typedef enum {
     ERROR
 } ErrorCode;
 
-double clip_by_value(double x, double min_val, double max_val) {
+// noinline + barrier: the check's recomputation of clip(x) is a separate, independent call
+__attribute__((noinline)) double clip_by_value(double x, double min_val, double max_val) {
+    __asm__ volatile("" ::: "memory");
     if (x < min_val)
         return min_val;
     else if (x > max_val)
@@ -122,8 +125,9 @@ double tanh_error_detection(double input, ErrorCode *error_out){
     double alpha = (1 - y) / (1 + y);
     double left = (alpha - 1) / (alpha + 1);
     double right = (exp_inv_value - 1) / (exp_inv_value + 1);
-    double epsilon = 0.0001;            // float32 on AVR: absolute tolerance, tanh in [-1, 1]
-    if (fabs(left - right) < epsilon) {
+    int input_bad = (clipped_value != clip_by_value(input, -3, 3));   // input check
+    double epsilon = 0.0005;            // float32: absolute tolerance (worst fault-free residual 1.5e-4)
+    if (fabs(left - right) < epsilon && !input_bad) {
         *error_out = SUCCESS;
         return y;
     } else {
@@ -143,8 +147,9 @@ double sigmoid_error_detection(double input, ErrorCode *error_out){
     // Error detection started
     double left = y / (1 - y);
     double right = S_even + S_odd;                // cached terms: one addition
-    double epsilon = 0.001;             // float32 on AVR: absolute tolerance
-    if (fabs(left - right) < epsilon) {
+    int input_bad = (clipped_value != clip_by_value(input, -3, 3));   // input check
+    double epsilon = 0.005;             // float32: absolute tolerance (worst fault-free residual 1.2e-3)
+    if (fabs(left - right) < epsilon && !input_bad) {
         *error_out = SUCCESS;
         return y;
     } else {

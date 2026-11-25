@@ -5,21 +5,23 @@
  *  - 30 cached Maclaurin terms, summed once into even and odd parts,
  *      e^{x} = S_even + S_odd,  e^{-x} = S_even - S_odd;
  *  - inputs clipped to [-3, 3];
- *  - absolute checks: |y/(1-y) - e^x| < 1e-3 (sigmoid), 1e-4 (tanh and L2, sum y^2 = 1).
+ *  - absolute checks: |y/(1-y) - e^x| < 5e-3 (sigmoid), 5e-4 (tanh), |sum y^2 - 1| < 1e-4 (L2);
+ *  - input check: the clipped input is compared with an independent recomputation of clip(x).
  * main() runs a false-alarm sweep and a fault-injection test.
  */
 #include <stdio.h>
 #include <math.h>
 
 #define NUM_TERMS 30
-#define EPSILON   0.0001
-#define EPSILON_SIGMOID 0.001
+#define EPSILON_L2      0.0001
+#define EPSILON_SIGMOID 0.005
+#define EPSILON_TANH    0.0005
 
 typedef enum { SUCCESS = 0, ERROR } ErrorCode;
 
 static double maclaurin_array[NUM_TERMS];
 static double S_even, S_odd;
-static int fault = 0;                    /* test only: inject the DeepLaser output faults */
+static int fault = 0;                    /* test only: 1 = output faults, 2 = clamp fault */
 
 double clip_by_value(double x, double min_val, double max_val) {
     if (x < min_val) return min_val;
@@ -60,31 +62,37 @@ double tanh_func(double input) {
 
 /* h1(y) = y / (1 - y) = e^{x} */
 double sigmoid_error_detection(double input, ErrorCode *error_out) {
-    Maclaurin_terms(clip_by_value(input, -3, 3), NUM_TERMS);
+    double xc = clip_by_value(input, -3, 3);
+    if (fault == 2) xc = 3;                          /* clamp fault: wrong clipped input */
+    Maclaurin_terms(xc, NUM_TERMS);
     maclaurin_sums(NUM_TERMS);
     double inv_exp = S_even - S_odd;
     double y = 1 / (1 + inv_exp);
-    if (fault) y = 1 - y;                            /* DeepLaser: negation skipped */
+    if (fault == 1) y = 1 - y;                       /* negation fault: y' = 1 - y */
     /* error detection */
     double left = y / (1 - y);
     double right = S_even + S_odd;                   /* cached terms: one addition */
-    *error_out = (fabs(left - right) < EPSILON_SIGMOID) ? SUCCESS : ERROR;
+    int input_bad = (xc != clip_by_value(input, -3, 3));
+    *error_out = (fabs(left - right) < EPSILON_SIGMOID && !input_bad) ? SUCCESS : ERROR;
     return y;
 }
 
 /* h2: alpha = (1 - y) / (1 + y) = e^{-2x}, compare (alpha-1)/(alpha+1) with (e^{-2x}-1)/(e^{-2x}+1) */
 double tanh_error_detection(double input, ErrorCode *error_out) {
-    Maclaurin_terms(2 * clip_by_value(input, -3, 3), NUM_TERMS);
+    double xc = clip_by_value(input, -3, 3);
+    if (fault == 2) xc = 3;                          /* clamp fault */
+    Maclaurin_terms(2 * xc, NUM_TERMS);
     maclaurin_sums(NUM_TERMS);
     double exp_value = S_even + S_odd;
     double y = (exp_value - 1) / (exp_value + 1);
-    if (fault) y = -y;                               /* DeepLaser: negation skipped */
+    if (fault == 1) y = -y;                          /* negation fault: y' = -y */
     /* error detection */
     double exp_inv_value = S_even - S_odd;           /* cached terms: one addition */
     double alpha = (1 - y) / (1 + y);
     double left = (alpha - 1) / (alpha + 1);
     double right = (exp_inv_value - 1) / (exp_inv_value + 1);
-    *error_out = (fabs(left - right) < EPSILON) ? SUCCESS : ERROR;
+    int input_bad = (xc != clip_by_value(input, -3, 3));
+    *error_out = (fabs(left - right) < EPSILON_TANH && !input_bad) ? SUCCESS : ERROR;
     return y;
 }
 
@@ -104,12 +112,12 @@ void l2norm_error_detection(const double *x, double *y, int n, ErrorCode *error_
     if (fault) for (int i = 0; i < n; i++) y[i] = 0; /* constant 1 of 1/||x|| lost -> y = 0 */
     double s = 0;
     for (int i = 0; i < n; i++) s += y[i] * y[i];
-    *error_out = (fabs(s - 1) < EPSILON) ? SUCCESS : ERROR;
+    *error_out = (fabs(s - 1) < EPSILON_L2) ? SUCCESS : ERROR;
 }
 
 int main(void) {
     double x[128], y[128];
-    for (fault = 0; fault <= 1; fault++) {
+    for (fault = 0; fault <= 2; fault++) {
         int a_sig = 0, a_tanh = 0, a_l2 = 0;
         for (int i = 0; i <= 2000; i++) {
             ErrorCode e1, e2;
@@ -124,8 +132,11 @@ int main(void) {
             l2norm_error_detection(x, y, 128, &e3);
             a_l2 += (e3 != SUCCESS);
         }
-        printf("%s: sigmoid %d/2001, tanh %d/2001, l2norm %d/200\n",
-               fault ? "detected (faults injected)" : "false alarms (fault-free)", a_sig, a_tanh, a_l2);
+        const char *what[] = {"false alarms (fault-free)", "detected (output faults)", "detected (clamp fault)"};
+        if (fault == 2)
+            printf("%s: sigmoid %d/2001, tanh %d/2001\n", what[fault], a_sig, a_tanh);
+        else
+            printf("%s: sigmoid %d/2001, tanh %d/2001, l2norm %d/200\n", what[fault], a_sig, a_tanh, a_l2);
     }
     return 0;
 }

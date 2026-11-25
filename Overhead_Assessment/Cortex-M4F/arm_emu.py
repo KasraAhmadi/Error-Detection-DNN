@@ -109,6 +109,11 @@ class KernelEmu:
     def insn_at(self, func: str) -> dict[int, Insn]:
         return {i.addr: i for i in self.insns[func]}
 
+    def all_insn_at(self) -> dict[int, Insn]:
+        if not hasattr(self, "_all_iat"):
+            self._all_iat = {i.addr: i for lst in self.insns.values() for i in lst}
+        return self._all_iat
+
     # -------------------------------------------------------------------- core
     def _get_uc(self):
         """One Unicorn instance is reused; registers are zeroed on every run so
@@ -159,7 +164,7 @@ class KernelEmu:
         faddr, fsize = self.syms[func]
         tfunc = target_func or func
         taddr, _ = self.syms[tfunc]
-        iat = self.insn_at(tfunc)
+        iat = {**self.all_insn_at(), **self.insn_at(tfunc)}   # skips may target callees
 
         # ---- marshal arguments (AAPCS hard-float)
         ptr = DATA_BASE
